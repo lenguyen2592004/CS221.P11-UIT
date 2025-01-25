@@ -2,3 +2,4 @@ transformers
 Unidecode
 tensorflow
 streamlit
+datasets
