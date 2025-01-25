@@ -1,0 +1,4 @@
+transformers
+Unidecode
+tensorflow
+streamlit
