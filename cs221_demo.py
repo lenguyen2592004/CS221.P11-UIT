@@ -9,8 +9,7 @@ from datasets import Dataset
 import torch
 from sklearn.metrics import f1_score, log_loss
 import streamlit as st
-import torch
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
 # --- Ánh xạ các từ viết tắt ---
 contraction_mapping = {"ain't": "is not", "aren't": "are not", "can't": "cannot", "'cause": "because", "could've": "could have",
                        "couldn't": "could not", "didn't": "did not", "doesn't": "does not", "don't": "do not", "hadn't": "had not",
@@ -104,69 +103,44 @@ print('SUCCESS!')
 max_len = 64
 emotions = ['anger', 'fear', 'joy', 'sadness', 'surprise']
 
-def predict_emotions_soft_voting(text, threshold=0.3):
-    start =time.time()
-    predictions = {emotion: [] for emotion in emotions}
-
-    # DeBERTa prediction
-    text_deberta = preprocess_data(text)
-    tokenizer_deberta = tokenizers["deberta"]
-    inputs_deberta = tokenizer_deberta(
-        text_deberta,
-        padding='max_length',
-        truncation=True,
-        max_length=max_len,
-        return_tensors='pt'
-    )
-    input_ids_deberta = inputs_deberta['input_ids'].to(device)
-    attention_mask_deberta = inputs_deberta['attention_mask'].to(device)
-    with torch.no_grad():
-        outputs_deberta = models["deberta"](input_ids=input_ids_deberta, attention_mask=attention_mask_deberta)
-        logits_deberta = outputs_deberta.logits
-        probs_deberta = torch.sigmoid(logits_deberta).cpu().numpy()
-
-    # RoBERTa and XLNet predictions
-    text_roberta_xlnet = preprocess_data(text)
-    for model_name in ["roberta", "xlnet"]:
+def predict_emotions_hard_voting(text,threshold=0.5):
+    predictions = []
+    for model_name, model in models.items():
         tokenizer = tokenizers[model_name]
-        inputs = tokenizer(
-            text_roberta_xlnet,
-            padding='max_length',
-            truncation=True,
+        inputs = tokenizer.encode_plus(
+            text,
+            None,
+            add_special_tokens=True,
             max_length=max_len,
-            return_tensors='pt'
+            padding='max_length',
+            return_token_type_ids=True,
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt',
         )
+
         input_ids = inputs['input_ids'].to(device)
         attention_mask = inputs['attention_mask'].to(device)
-        if 'token_type_ids' in inputs:
-            token_type_ids = inputs['token_type_ids'].to(device)
-            model_inputs = {'input_ids': input_ids, 'attention_mask': attention_mask, 'token_type_ids': token_type_ids}
-        else:
-            model_inputs = {'input_ids': input_ids, 'attention_mask': attention_mask}
+        token_type_ids = inputs['token_type_ids'].to(device)
 
         with torch.no_grad():
-            outputs = models[model_name](**model_inputs)
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids)
             logits = outputs.logits
-            probs = torch.sigmoid(logits).cpu().numpy()
+            probs = torch.sigmoid(logits)  # Use sigmoid for multi-label classification
+            preds = (probs >= threshold).int()  # Apply threshold of 0.5 for hard voting
+            predictions.append(preds)
 
-            for i, emotion in enumerate(emotions):
-                if model_name == "roberta":
-                    predictions[emotion].append(probs[0][i])
-                else: #xlnet
-                    predictions[emotion].append(probs[0][i])
+    # --- Hard Voting Logic ---
+    # Convert list of tensors to a single tensor
+    predictions_tensor = torch.cat(predictions, dim=0)
+    # Sum predictions across models
+    summed_predictions = torch.sum(predictions_tensor, dim=0)
+    # Final prediction: 1 if at least 2 models predict 1, otherwise 0
+    final_predictions = (summed_predictions >= 2).int()
 
-    # Combine predictions
-    final_probs = []
-    for i, emotion in enumerate(emotions):
-        if emotion == 'anger':
-            final_probs.append((probs_deberta[0][i] * 2 + predictions[emotion][0] + predictions[emotion][1])/4) # DeBERTa * 2
-        elif emotion == 'surprise':
-            final_probs.append((predictions[emotion][1] * 2 + predictions[emotion][0] + probs_deberta[0][i])/4) # XLNet * 2
-        else:
-            final_probs.append((probs_deberta[0][i] + predictions[emotion][0] + predictions[emotion][1])/3)
-
-    binary_preds = (np.array(final_probs) >= threshold).astype(int)
-    return binary_preds.flatten()
+    return final_predictions.cpu().numpy().flatten()
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Sentiment Analysis", page_icon="🔍", layout="wide")
@@ -225,7 +199,7 @@ text_input = st.text_area("Nhập văn bản vào đây:")
 
 if st.button("Predict", type="primary"):
     start=time.time()
-    predictions = predict_emotions_soft_voting(text_input)
+    predictions = predict_emotions_hard_voting(text_input)
     predicted_emotions = [emotions[i] for i, pred in enumerate(predictions) if pred == 1]
     end=time.time()-start
     if predicted_emotions:
